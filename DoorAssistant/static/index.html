@@ -246,7 +246,7 @@ Tap "Enable Microphone" to begin.
       const notifOk = await requestNotificationPermission();
       if (notifOk) {
         updateStatus(
-          updateStatus.textContent +
+          (statusEl.textContent || "") +
             "\n\n🔔 Notifications enabled. You'll be alerted when leaving is detected."
         );
       }
@@ -272,9 +272,10 @@ Tap "Enable Microphone" to begin.
   manualBtn.onclick = async () => {
     if (!stream) return;
     updateStatus("🎙️ Recording... Say where you're going (e.g., 'gym', 'work', 'grocery store').");
-    speak("Where are you going?");
     try {
       const data = await recordAndSend(3.0);
+      // Prompt by voice AFTER recording to avoid picking up TTS in mic
+      speak("Thanks. Processing your destination now.");
       handleResult(data);
     } catch (e) {
       updateStatus(`❌ Recording failed: ${e}`);
@@ -345,10 +346,11 @@ Tap "Enable Microphone" to begin.
         updateStatus(
           "🚪 Leaving detected!\n\n🎤 Recording... Say where you're going."
         );
-        speak("Where are you going?");
 
         try {
           const data = await recordAndSend(3.0);
+          // Speak AFTER recording to avoid TTS echo in transcript
+          speak("Thanks. Processing your destination now.");
           handleResult(data);
         } catch (e) {
           updateStatus(`❌ Auto record failed: ${e}\n\nTap Manual Record to try again.`);

@@ -11,6 +11,7 @@ from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from openai import OpenAI
+import openai as openai_mod  # for compatibility fallbacks
 
 # Try loading a local .env file if present (optional; safe if missing)
 try:
@@ -36,12 +37,17 @@ BLE_CHAR_UUID = os.getenv("BLE_CHAR_UUID", "")             # characteristic that
 
 STT_MODEL = "gpt-4o-mini-transcribe"
 LLM_MODEL = "gpt-4o-mini"
+EMBEDDINGS_MODEL = "text-embedding-3-small"
 
 # Read OpenAI API key from environment; avoid constructing the client if missing
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 if OPENAI_API_KEY:
     print("[config] OPENAI_API_KEY found. Initializing OpenAI client...")
     client: Optional[OpenAI] = OpenAI(api_key=OPENAI_API_KEY)
+    try:
+        openai_mod.api_key = OPENAI_API_KEY
+    except Exception:
+        pass
 else:
     print("[config] WARNING: OPENAI_API_KEY not set. Audio transcription will fail.")
     print("[config]   - Check your .env file in the DoorAssistant/ directory")
@@ -189,14 +195,143 @@ async def sse_stream():
 
     return StreamingResponse(gen(), media_type="text/event-stream")
 
+def _get_embedding(text: str) -> List[float]:
+    try:
+        if client and hasattr(client, "embeddings"):
+            r = client.embeddings.create(model=EMBEDDINGS_MODEL, input=text)
+            return list(r.data[0].embedding)
+    except Exception as e:
+        print("[embed] client.embeddings.create failed:", e)
+    try:
+        if hasattr(openai_mod, "Embedding"):
+            r = openai_mod.Embedding.create(model=EMBEDDINGS_MODEL, input=text)
+            return list(r["data"][0]["embedding"])  # legacy dict
+    except Exception as e:
+        print("[embed] openai.Embedding.create failed:", e)
+    return []
+
+def _cosine(a: List[float], b: List[float]) -> float:
+    import math
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = sum(x*y for x, y in zip(a, b))
+    na = math.sqrt(sum(x*x for x in a))
+    nb = math.sqrt(sum(y*y for y in b))
+    if na == 0.0 or nb == 0.0:
+        return 0.0
+    return dot / (na * nb)
+
+_candidate_embeds: Dict[str, List[float]] = {}
+
+def _build_candidate_embeddings() -> None:
+    if _candidate_embeds:
+        return
+    # Candidate phrases for each destination
+    SYNONYMS = {
+        "gym": ["gym", "workout", "fitness"],
+        "class": ["class", "lecture", "course", "classroom"],
+        "campus": ["campus", "university", "college", "school"],
+        "work": ["work", "office", "job", "workplace", "company"],
+        "grocery": ["grocery", "groceries", "supermarket", "market"],
+        "store": ["store", "shop", "shopping", "market"],
+    }
+    phrases: List[str] = []
+    for key in DEST_ITEMS.keys():
+        phrases.append(key)
+        for s in SYNONYMS.get(key, []):
+            phrases.append(s)
+    # Dedup
+    phrases = dedup(phrases)
+    # Build embeddings
+    for p in phrases:
+        emb = _get_embedding(p)
+        if emb:
+            _candidate_embeds[p] = emb
+
+def _choose_by_embeddings(text: str) -> str:
+    if client is None:
+        return ""
+    _build_candidate_embeddings()
+    q = _get_embedding(text)
+    if not q:
+        return ""
+    best_key, best_score = "", 0.0
+    for key in DEST_ITEMS.keys():
+        # Compare against the key itself and its synonyms
+        pool = [key] + [p for p in _candidate_embeds.keys() if p != key and p in _candidate_embeds and p in (key,)]
+        # Above line mistakenly limits pool; build proper pool:
+    # Rebuild pool properly
+    SYNONYMS = {
+        "gym": ["gym", "workout", "fitness"],
+        "class": ["class", "lecture", "course", "classroom"],
+        "campus": ["campus", "university", "college", "school"],
+        "work": ["work", "office", "job", "workplace", "company"],
+        "grocery": ["grocery", "groceries", "supermarket", "market"],
+        "store": ["store", "shop", "shopping", "market"],
+    }
+    best_key, best_score = "", 0.0
+    for key, syns in SYNONYMS.items():
+        pool = [key] + syns
+        score = 0.0
+        for p in pool:
+            emb = _candidate_embeds.get(p) or []
+            if emb:
+                score = max(score, _cosine(q, emb))
+        if score > best_score:
+            best_key, best_score = key, score
+    # Threshold to avoid random matches
+    if best_score >= 0.60:
+        return best_key
+    return ""
+
 def normalize_destination(text: str) -> str:
-    t = text.lower().strip()
-    # very simple: if user says "i'm going to the gym"
+    t = (text or "").lower().strip()
+    import re
+    from difflib import SequenceMatcher
+
+    # Try embeddings-based selection first (maps "jim" -> "gym")
+    try:
+        dest = _choose_by_embeddings(t)
+        if dest:
+            return dest
+    except Exception as e:
+        print("[embed] destination selection failed:", e)
+
+    # Tokenize simple words
+    words = re.findall(r"[a-zA-Z]+", t)
+
+    SYNONYMS = {
+        "gym": ["gym", "workout", "fitness", "jim", "weightroom"],
+        "class": ["class", "lecture", "course", "classroom"],
+        "campus": ["campus", "university", "college", "school"],
+        "work": ["work", "office", "job", "workplace", "company"],
+        "grocery": ["grocery", "groceries", "supermarket", "market", "grocerystore"],
+        "store": ["store", "shop", "shopping", "market"],
+    }
+
+    # 1) Direct substring match
     for key in DEST_ITEMS.keys():
         if key in t:
             return key
-    # fallback: first word
-    return t.split()[-1] if t else ""
+
+    # 2) Synonym exact word match
+    for key, syns in SYNONYMS.items():
+        for s in syns:
+            if s in words or s.replace(" ", "") in t:
+                return key
+
+    # 3) Fuzzy match per word against destination keys
+    best_key, best_score = "", 0.0
+    for w in words:
+        for key in DEST_ITEMS.keys():
+            score = SequenceMatcher(None, w, key).ratio()
+            if score > best_score:
+                best_key, best_score = key, score
+    if best_score >= 0.75:
+        return best_key
+
+    # Fallback: last word
+    return words[-1] if words else ""
 
 def dedup(items: List[str]) -> List[str]:
     out, seen = [], set()
@@ -214,22 +349,84 @@ def dedup(items: List[str]) -> List[str]:
 def items_from_builtin(dest_key: str) -> List[str]:
     extras = DEST_ITEMS.get(dest_key, [])
     return dedup(BASE_ESSENTIALS + extras)
+def sanitize_items(items: List[str]) -> List[str]:
+    out: List[str] = []
+    for it in items:
+        s = str(it).strip()
+        if not s:
+            continue
+        # Drop sentences or replies
+        if any(c in s for c in ".!?"):
+            continue
+        if len(s.split()) > 4:
+            continue
+        out.append(s)
+    # Always include essentials and cap length
+    out = dedup(BASE_ESSENTIALS + out)
+    return out[:10]
 
 def items_from_llm(transcript: str) -> List[str]:
     if client is None:
         return []
-    # Responses API reference :contentReference[oaicite:6]{index=6}
+    # Build a strict prompt — user perspective, JSON-only
     prompt = f"""
-Return ONLY JSON in the format: {{"items":[string,...]}}.
+Return ONLY valid JSON: {{"items": [string,...]}}.
 
-User said: "{transcript}"
+I am going to "{transcript}".
+List the items I would need to bring.
 
-Goal: Suggest a short list (5-10) of items to bring.
-Always include: keys, wallet, phone, ID (unless clearly irrelevant).
-Avoid duplicates. Use concise nouns.
+Rules:
+- Keep it short and practical (5–10 items).
+- ALWAYS include: keys, wallet, phone, ID (unless clearly irrelevant).
+- Use concise item nouns only; NO sentences or explanations.
 """
-    resp = client.responses.create(model=LLM_MODEL, input=prompt)
-    text = resp.output_text.strip()
+
+    text: str = ""
+    # Preferred: Responses API
+    try:
+        if hasattr(client, "responses"):
+            resp = client.responses.create(
+                model=LLM_MODEL,
+                input=prompt,
+                temperature=0,
+                response_format={"type": "json_object"}
+            )
+            text = getattr(resp, "output_text", "").strip() or str(resp)
+    except Exception as e:
+        print("[llm] responses.create failed:", e)
+
+    # Fallback: Chat Completions (new SDK style)
+    if not text:
+        try:
+            if hasattr(client, "chat") and hasattr(client.chat, "completions"):
+                comp = client.chat.completions.create(
+                    model=LLM_MODEL,
+                    messages=[
+                        {"role": "system", "content": "Return ONLY JSON in the format {\"items\":[string,...]}"},
+                        {"role": "user", "content": transcript},
+                    ],
+                    temperature=0,
+                )
+                text = (comp.choices[0].message.content or "").strip()
+        except Exception as e:
+            print("[llm] chat.completions.create failed:", e)
+
+    # Fallback: ChatCompletion (legacy SDK)
+    if not text:
+        try:
+            if hasattr(openai_mod, "ChatCompletion"):
+                comp = openai_mod.ChatCompletion.create(
+                    model=LLM_MODEL,
+                    messages=[
+                        {"role": "system", "content": "Return ONLY JSON in the format {\"items\":[string,...]}"},
+                        {"role": "user", "content": transcript},
+                    ],
+                    temperature=0,
+                )
+                # Legacy returns dict
+                text = str(comp["choices"][0]["message"]["content"]).strip()
+        except Exception as e:
+            print("[llm] ChatCompletion.create failed:", e)
 
     import json
     try:
@@ -237,9 +434,36 @@ Avoid duplicates. Use concise nouns.
         items = data.get("items", [])
         if not isinstance(items, list):
             return []
-        return dedup([str(x) for x in items])
+        return sanitize_items([str(x) for x in items])
     except Exception:
         return []
+
+def transcribe_audio(file_obj) -> str:
+    # Try modern SDK
+    try:
+        if client and hasattr(client, "audio") and hasattr(client.audio, "transcriptions"):
+            stt = client.audio.transcriptions.create(model=STT_MODEL, file=file_obj)
+            return getattr(stt, "text", None) or (stt.get("text") if isinstance(stt, dict) else "") or ""
+    except Exception as e:
+        print("[stt] client.audio.transcriptions.create failed:", e)
+
+    # Try module-level modern SDK
+    try:
+        if hasattr(openai_mod, "audio") and hasattr(openai_mod.audio, "transcriptions"):
+            stt = openai_mod.audio.transcriptions.create(model=STT_MODEL, file=file_obj)
+            return getattr(stt, "text", None) or (stt.get("text") if isinstance(stt, dict) else "") or ""
+    except Exception as e:
+        print("[stt] openai.audio.transcriptions.create failed:", e)
+
+    # Legacy Whisper endpoint
+    try:
+        if hasattr(openai_mod, "Audio") and hasattr(openai_mod.Audio, "transcribe"):
+            stt = openai_mod.Audio.transcribe("whisper-1", file_obj)
+            return getattr(stt, "text", None) or (stt.get("text") if isinstance(stt, dict) else "") or ""
+    except Exception as e:
+        print("[stt] openai.Audio.transcribe failed:", e)
+
+    return ""
 
 @app.post("/audio_suggest")
 async def audio_suggest(audio: UploadFile = File(...)):
@@ -259,9 +483,7 @@ async def audio_suggest(audio: UploadFile = File(...)):
     if client is None:
         return {"transcript": "", "items": [], "mode": "error", "message": "OPENAI_API_KEY is not set. Set it and restart the server."}
 
-    # Speech-to-text guide :contentReference[oaicite:7]{index=7}
-    stt = client.audio.transcriptions.create(model=STT_MODEL, file=f)
-    transcript = getattr(stt, "text", None) or (stt.get("text") if isinstance(stt, dict) else "")
+    transcript = transcribe_audio(f)
     transcript = (transcript or "").strip()
     if not transcript:
         return {"transcript": "", "items": [], "mode": "error", "message": "No transcript"}
@@ -280,8 +502,8 @@ async def audio_suggest(audio: UploadFile = File(...)):
     dest_key = normalize_destination(transcript)
     items = items_from_builtin(dest_key)
 
-    # Optional LLM fallback if destination not recognized
-    if USE_LLM and (dest_key not in DEST_ITEMS):
+    # Prefer LLM-generated items when available
+    if client is not None:
         llm_items = items_from_llm(transcript)
         if llm_items:
             items = dedup(llm_items)

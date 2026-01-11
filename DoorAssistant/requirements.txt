@@ -4,3 +4,4 @@ pyserial==3.5
 openai==1.59.7
 python-dotenv==1.0.1
 bleak==0.22.3
+python-multipart==0.0.21
