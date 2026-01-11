@@ -30,10 +30,6 @@ USE_LLM = os.getenv("USE_LLM", "0") == "1"
 
 # BLE integration (optional)
 ENABLE_BLE = os.getenv("ENABLE_BLE", "0") == "1"
-BLE_DEVICE_NAME = os.getenv("BLE_DEVICE_NAME", "")
-BLE_DEVICE_ADDRESS = os.getenv("BLE_DEVICE_ADDRESS", "")  # Windows sometimes shows MAC like AA:BB:CC:DD:EE:FF
-BLE_SERVICE_UUID = os.getenv("BLE_SERVICE_UUID", "")      # e.g. custom service
-BLE_CHAR_UUID = os.getenv("BLE_CHAR_UUID", "")             # characteristic that notifies messages
 
 STT_MODEL = "gpt-4o-mini-transcribe"
 LLM_MODEL = "gpt-4o-mini"
