@@ -439,10 +439,10 @@ Rules:
         return []
 
 def transcribe_audio(file_obj) -> str:
-    # Try modern SDK
+    # Try modern SDK - force English language
     try:
         if client and hasattr(client, "audio") and hasattr(client.audio, "transcriptions"):
-            stt = client.audio.transcriptions.create(model=STT_MODEL, file=file_obj)
+            stt = client.audio.transcriptions.create(model=STT_MODEL, file=file_obj, language="en")
             return getattr(stt, "text", None) or (stt.get("text") if isinstance(stt, dict) else "") or ""
     except Exception as e:
         print("[stt] client.audio.transcriptions.create failed:", e)
@@ -450,7 +450,7 @@ def transcribe_audio(file_obj) -> str:
     # Try module-level modern SDK
     try:
         if hasattr(openai_mod, "audio") and hasattr(openai_mod.audio, "transcriptions"):
-            stt = openai_mod.audio.transcriptions.create(model=STT_MODEL, file=file_obj)
+            stt = openai_mod.audio.transcriptions.create(model=STT_MODEL, file=file_obj, language="en")
             return getattr(stt, "text", None) or (stt.get("text") if isinstance(stt, dict) else "") or ""
     except Exception as e:
         print("[stt] openai.audio.transcriptions.create failed:", e)
@@ -458,7 +458,7 @@ def transcribe_audio(file_obj) -> str:
     # Legacy Whisper endpoint
     try:
         if hasattr(openai_mod, "Audio") and hasattr(openai_mod.Audio, "transcribe"):
-            stt = openai_mod.Audio.transcribe("whisper-1", file_obj)
+            stt = openai_mod.Audio.transcribe("whisper-1", file_obj, language="en")
             return getattr(stt, "text", None) or (stt.get("text") if isinstance(stt, dict) else "") or ""
     except Exception as e:
         print("[stt] openai.Audio.transcribe failed:", e)
@@ -498,15 +498,9 @@ async def audio_suggest(audio: UploadFile = File(...)):
     if "repeat" in t:
         return {"transcript": transcript, "items": last_items, "mode": "command", "message": "Repeat"}
 
-    # Normal destination flow
+    # Normal destination flow - use hard-coded destinations only
     dest_key = normalize_destination(transcript)
     items = items_from_builtin(dest_key)
-
-    # Prefer LLM-generated items when available
-    if client is not None:
-        llm_items = items_from_llm(transcript)
-        if llm_items:
-            items = dedup(llm_items)
 
     last_items = items
     last_transcript = transcript

@@ -122,6 +122,7 @@ Tap "Enable Microphone" to begin.
   let stream = null;
   let armed = false;
   let eventSource = null;
+  let isSpeaking = false;
 
   // Register service worker for offline support
   if ("serviceWorker" in navigator) {
@@ -135,13 +136,31 @@ Tap "Enable Microphone" to begin.
   }
 
   function speak(text) {
-    try {
-      const u = new SpeechSynthesisUtterance(text);
-      speechSynthesis.cancel();
-      speechSynthesis.speak(u);
-    } catch (e) {
-      console.log("Speech failed:", e);
-    }
+    return new Promise((resolve) => {
+      try {
+        isSpeaking = true;
+        const u = new SpeechSynthesisUtterance(text);
+        u.lang = "en-US"; // Force English
+        u.rate = 1.0;
+        u.onend = () => {
+          // Wait 2 seconds after speech ends before allowing recording
+          setTimeout(() => {
+            isSpeaking = false;
+            resolve();
+          }, 2000);
+        };
+        u.onerror = () => {
+          isSpeaking = false;
+          resolve();
+        };
+        speechSynthesis.cancel();
+        speechSynthesis.speak(u);
+      } catch (e) {
+        console.log("Speech failed:", e);
+        isSpeaking = false;
+        resolve();
+      }
+    });
   }
 
   function pickMimeType() {
@@ -159,6 +178,17 @@ Tap "Enable Microphone" to begin.
 
   async function recordAndSend(seconds = 3.0) {
     if (!stream) throw new Error("No mic stream available");
+    if (isSpeaking) {
+      // Wait for speech to finish
+      await new Promise(resolve => {
+        const check = setInterval(() => {
+          if (!isSpeaking) {
+            clearInterval(check);
+            resolve();
+          }
+        }, 100);
+      });
+    }
     const mimeType = pickMimeType();
     const rec = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
     const chunks = [];
@@ -238,7 +268,7 @@ Tap "Enable Microphone" to begin.
       updateStatus(
         "✅ Microphone enabled.\n\nTap 'Arm Sensor Detection' to wait for the Arduino sensor, or tap 'Manual Record' to start now."
       );
-      speak("Microphone ready.");
+      await speak("Microphone ready.");
       armBtn.disabled = false;
       manualBtn.disabled = false;
 
@@ -270,12 +300,12 @@ Tap "Enable Microphone" to begin.
   };
 
   manualBtn.onclick = async () => {
-    if (!stream) return;
-    updateStatus("🎙️ Recording... Say where you're going (e.g., 'gym', 'work', 'grocery store').");
+    if (!stream || isSpeaking) return;
+    await speak("Where are you going?");
+    updateStatus("🎙️ Recording now... Speak your destination.");
     try {
-      const data = await recordAndSend(3.0);
-      // Prompt by voice AFTER recording to avoid picking up TTS in mic
-      speak("Thanks. Processing your destination now.");
+      const data = await recordAndSend(2.0);
+      updateStatus("⏳ Processing...");
       handleResult(data);
     } catch (e) {
       updateStatus(`❌ Recording failed: ${e}`);
@@ -318,10 +348,13 @@ Tap "Enable Microphone" to begin.
       });
       itemsHtml += "</ul></div>";
       itemsEl.innerHTML = itemsHtml;
+      // Speak items once, cancel any previous speech
+      speechSynthesis.cancel();
       speak("Suggested items: " + items.join(", "));
     } else {
       statusText += "❓ Didn't get a clear destination. Please try again.";
       itemsEl.innerHTML = "";
+      speechSynthesis.cancel();
       speak("I didn't get a clear destination. Please try again.");
     }
     updateStatus(statusText);
@@ -344,13 +377,14 @@ Tap "Enable Microphone" to begin.
         });
 
         updateStatus(
-          "🚪 Leaving detected!\n\n🎤 Recording... Say where you're going."
+          "🚪 Leaving detected! Preparing to record..."
         );
 
         try {
-          const data = await recordAndSend(3.0);
-          // Speak AFTER recording to avoid TTS echo in transcript
-          speak("Thanks. Processing your destination now.");
+          await speak("Where are you going?");
+          updateStatus("🎙️ Recording now... Speak your destination.");
+          const data = await recordAndSend(2.0);
+          updateStatus("⏳ Processing...");
           handleResult(data);
         } catch (e) {
           updateStatus(`❌ Auto record failed: ${e}\n\nTap Manual Record to try again.`);

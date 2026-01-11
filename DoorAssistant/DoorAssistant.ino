@@ -1,13 +1,14 @@
-#define TRIG_PIN 2
-#define ECHO_PIN 3
-#define DISTANCE_THRESHOLD_CM 50
+// Arduino Mega 2560
+// PIR (HC-SR501): OUT -> D38, VCC -> 5V, GND -> GND
+// HC-05: TXD -> D19 (RX1), RXD <- D18 (TX1) through a voltage divider
 
-unsigned long lastEvent = 0;
-const unsigned long COOLDOWN_MS = 3000;
+#define PIR_PIN 38
+
+unsigned long lastMotion = 0;
+const unsigned long COOLDOWN_MS = 5000;
 
 void setup() {
-  pinMode(TRIG_PIN, OUTPUT);
-  pinMode(ECHO_PIN, INPUT);
+  pinMode(PIR_PIN, INPUT);
 
   Serial.begin(9600);      // USB Serial Monitor
   Serial1.begin(9600);     // HC-05 Bluetooth (Serial1 = pins 18/19)
@@ -17,34 +18,17 @@ void setup() {
   Serial1.println("BOOT");
 }
 
-long getDistance() {
-  digitalWrite(TRIG_PIN, LOW);
-  delayMicroseconds(2);
-  digitalWrite(TRIG_PIN, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(TRIG_PIN, LOW);
-
-  long duration = pulseIn(ECHO_PIN, HIGH, 30000);
-  
-  long distance = duration / 58;
-  return distance;
-}
-
 void loop() {
-  long distance = getDistance();
+  int motion = digitalRead(PIR_PIN);
 
-  // If object detected close (person leaving)
-  if (distance > 0 && distance <= DISTANCE_THRESHOLD_CM) {
+  if (motion == HIGH) {
     unsigned long now = millis();
 
-    if (now - lastEvent >= COOLDOWN_MS) {
-      lastEvent = now;
+    if (now - lastMotion >= COOLDOWN_MS) {
+      lastMotion = now;
 
-      // Send event for server to capture
-      Serial.println("EVENT:LEAVING");
+      Serial.println("Detected leaving");
       Serial1.println("EVENT:LEAVING");
     }
   }
-
-  delay(100);  // Small delay to avoid overwhelming the sensor
 }
