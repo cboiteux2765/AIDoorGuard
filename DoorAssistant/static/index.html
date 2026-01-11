@@ -1,0 +1,375 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no"/>
+  <meta name="apple-mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+  <meta name="apple-mobile-web-app-title" content="Door Assistant"/>
+  <meta name="theme-color" content="#4a90e2"/>
+  <link rel="manifest" href="/static/manifest.json"/>
+  <link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 180 180'><rect fill='%234a90e2' width='180' height='180' rx='40'/><text x='90' y='110' font-size='90' font-weight='bold' text-anchor='middle' fill='white' font-family='system-ui'>DA</text></svg>"/>
+  <title>Door Assistant</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; padding: 0; -webkit-user-select: none; user-select: none; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      padding: 20px;
+      color: #333;
+    }
+    .container {
+      background: white;
+      border-radius: 20px;
+      padding: 30px 20px;
+      box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+      max-width: 500px;
+      width: 100%;
+      text-align: center;
+    }
+    h1 { margin: 0 0 10px 0; font-size: 28px; color: #4a90e2; }
+    .subtitle { color: #999; font-size: 14px; margin-bottom: 20px; }
+    .button-group {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      margin: 20px 0;
+    }
+    button {
+      font-size: 16px;
+      padding: 16px 20px;
+      border-radius: 12px;
+      border: none;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.3s;
+      width: 100%;
+      color: white;
+    }
+    #enable {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    }
+    #enable:active { transform: scale(0.98); }
+    #arm {
+      background: #4caf50;
+    }
+    #arm:active { transform: scale(0.98); }
+    #manual {
+      background: #2196f3;
+    }
+    #manual:active { transform: scale(0.98); }
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    #status {
+      color: #666;
+      margin-top: 20px;
+      white-space: pre-wrap;
+      font-size: 14px;
+      line-height: 1.6;
+      min-height: 60px;
+      padding: 15px;
+      background: #f5f5f5;
+      border-radius: 10px;
+    }
+    .icon { font-size: 32px; margin-bottom: 10px; }
+    .items-list {
+      margin-top: 15px;
+      text-align: left;
+      background: #f0f4ff;
+      padding: 15px;
+      border-radius: 10px;
+    }
+    .items-list strong { color: #4a90e2; }
+    .items-list li { margin: 5px 0; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="icon">🚪</div>
+    <h1>Door Assistant</h1>
+    <p class="subtitle">Smart packing companion</p>
+
+    <div class="button-group">
+      <button id="enable">🎤 Enable Microphone</button>
+      <button id="arm" disabled>✅ Arm Sensor Detection</button>
+      <button id="manual" disabled>🎙️ Manual Record</button>
+    </div>
+
+    <div id="status">
+Waiting to connect.
+Tap "Enable Microphone" to begin.
+
+📱 iPhone: Ensure you have enabled location/notification permissions in Settings.
+    </div>
+    <div id="items-output"></div>
+  </div>
+
+<script>
+  const statusEl = document.getElementById("status");
+  const itemsEl = document.getElementById("items-output");
+  const enableBtn = document.getElementById("enable");
+  const armBtn = document.getElementById("arm");
+  const manualBtn = document.getElementById("manual");
+
+  let stream = null;
+  let armed = false;
+  let eventSource = null;
+
+  // Register service worker for offline support
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.register("/static/sw.js").catch((err) => {
+      console.log("Service worker registration failed:", err);
+    });
+  }
+
+  function updateStatus(text) {
+    statusEl.textContent = text;
+  }
+
+  function speak(text) {
+    try {
+      const u = new SpeechSynthesisUtterance(text);
+      speechSynthesis.cancel();
+      speechSynthesis.speak(u);
+    } catch (e) {
+      console.log("Speech failed:", e);
+    }
+  }
+
+  function pickMimeType() {
+    const cands = ["audio/mp4", "audio/webm;codecs=opus", "audio/webm"];
+    for (const mt of cands) {
+      if (
+        window.MediaRecorder &&
+        MediaRecorder.isTypeSupported &&
+        MediaRecorder.isTypeSupported(mt)
+      )
+        return mt;
+    }
+    return "";
+  }
+
+  async function recordAndSend(seconds = 3.0) {
+    if (!stream) throw new Error("No mic stream available");
+    const mimeType = pickMimeType();
+    const rec = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+    const chunks = [];
+
+    return new Promise((resolve, reject) => {
+      rec.ondataavailable = (e) => {
+        if (e.data && e.data.size) chunks.push(e.data);
+      };
+      rec.onerror = (e) => reject(e.error || e);
+
+      rec.onstop = async () => {
+        try {
+          const blob = new Blob(
+            chunks,
+            { type: rec.mimeType || "application/octet-stream" }
+          );
+          const fd = new FormData();
+          const name =
+            rec.mimeType && rec.mimeType.includes("mp4")
+              ? "clip.mp4"
+              : "clip.webm";
+          fd.append("audio", blob, name);
+
+          const r = await fetch("/audio_suggest", {
+            method: "POST",
+            body: fd,
+          });
+          const data = await r.json();
+          resolve(data);
+        } catch (err) {
+          reject(err);
+        }
+      };
+
+      rec.start();
+      setTimeout(() => rec.stop(), seconds * 1000);
+    });
+  }
+
+  async function requestNotificationPermission() {
+    if (!("Notification" in window)) {
+      console.log("Notifications not supported");
+      return false;
+    }
+    if (Notification.permission === "granted") {
+      return true;
+    }
+    if (Notification.permission !== "denied") {
+      try {
+        const perm = await Notification.requestPermission();
+        return perm === "granted";
+      } catch (e) {
+        console.log("Notification permission error:", e);
+        return false;
+      }
+    }
+    return false;
+  }
+
+  function showNotification(title, options = {}) {
+    // Try native notification first
+    if (Notification.permission === "granted") {
+      try {
+        new Notification(title, options);
+        return;
+      } catch (e) {
+        console.log("Native notification failed:", e);
+      }
+    }
+    // Fallback: alert (iOS will show this as a modal)
+    alert(title);
+  }
+
+  enableBtn.onclick = async () => {
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      updateStatus(
+        "✅ Microphone enabled.\n\nTap 'Arm Sensor Detection' to wait for the Arduino sensor, or tap 'Manual Record' to start now."
+      );
+      speak("Microphone ready.");
+      armBtn.disabled = false;
+      manualBtn.disabled = false;
+
+      // Request notification permission
+      const notifOk = await requestNotificationPermission();
+      if (notifOk) {
+        updateStatus(
+          updateStatus.textContent +
+            "\n\n🔔 Notifications enabled. You'll be alerted when leaving is detected."
+        );
+      }
+
+      // Start listening to SSE stream
+      if (!eventSource) {
+        connectToSSE();
+      }
+    } catch (e) {
+      updateStatus(
+        `❌ Microphone failed: ${e}\n\n📱 iPhone: Ensure you're using HTTPS or an ngrok/Cloudflare tunnel.`
+      );
+    }
+  };
+
+  armBtn.onclick = () => {
+    armed = true;
+    updateStatus(
+      "🎯 Armed and waiting for Arduino sensor...\n\nWhen the ultrasonic sensor detects you leaving, the app will automatically prompt for your destination."
+    );
+  };
+
+  manualBtn.onclick = async () => {
+    if (!stream) return;
+    updateStatus("🎙️ Recording... Say where you're going (e.g., 'gym', 'work', 'grocery store').");
+    speak("Where are you going?");
+    try {
+      const data = await recordAndSend(3.0);
+      handleResult(data);
+    } catch (e) {
+      updateStatus(`❌ Recording failed: ${e}`);
+    }
+  };
+
+  function handleResult(data) {
+    const transcript = data.transcript || "";
+    const items = data.items || [];
+    const mode = data.mode || "result";
+    const msg = data.message || "";
+
+    let statusText = `📝 Heard: "${transcript}"\n`;
+    if (msg) {
+      statusText += `📌 ${msg}\n`;
+    }
+
+    if (mode === "command" && msg === "Repeat") {
+      statusText += "Repeating last result.";
+      if (items.length) speak("Suggested items: " + items.join(", "));
+      else speak("Nothing to repeat yet.");
+      updateStatus(statusText);
+      return;
+    }
+
+    if (mode === "command" && msg === "Cancelled") {
+      statusText += "Cancelled.";
+      speak("Okay.");
+      updateStatus(statusText);
+      itemsEl.innerHTML = "";
+      return;
+    }
+
+    // Show items
+    if (items.length) {
+      statusText += `✓ Found ${items.length} items to bring.`;
+      let itemsHtml = '<div class="items-list"><strong>📦 Suggested Items:</strong><ul>';
+      items.forEach((item) => {
+        itemsHtml += `<li>✓ ${item}</li>`;
+      });
+      itemsHtml += "</ul></div>";
+      itemsEl.innerHTML = itemsHtml;
+      speak("Suggested items: " + items.join(", "));
+    } else {
+      statusText += "❓ Didn't get a clear destination. Please try again.";
+      itemsEl.innerHTML = "";
+      speak("I didn't get a clear destination. Please try again.");
+    }
+    updateStatus(statusText);
+  }
+
+  function connectToSSE() {
+    if (eventSource) eventSource.close();
+    eventSource = new EventSource("/events/stream");
+
+    eventSource.onmessage = async (msg) => {
+      if (!armed || !stream) return;
+      try {
+        const ev = JSON.parse(msg.data);
+        if (ev.type !== "LEAVING") return;
+
+        // Show notification
+        showNotification("📤 You're leaving!", {
+          badge: "🚪",
+          tag: "leaving-alert",
+        });
+
+        updateStatus(
+          "🚪 Leaving detected!\n\n🎤 Recording... Say where you're going."
+        );
+        speak("Where are you going?");
+
+        try {
+          const data = await recordAndSend(3.0);
+          handleResult(data);
+        } catch (e) {
+          updateStatus(`❌ Auto record failed: ${e}\n\nTap Manual Record to try again.`);
+        }
+      } catch (e) {
+        console.log("SSE parse error:", e);
+      }
+    };
+
+    eventSource.onerror = () => {
+      console.log("SSE connection lost, retrying in 5s...");
+      setTimeout(connectToSSE, 5000);
+    };
+  }
+
+  // Auto-start SSE listening if already armed
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.ready.then(() => {
+      console.log("Service worker ready");
+    });
+  }
+</script>
+</body>
+</html>

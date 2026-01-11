@@ -1,0 +1,6 @@
+fastapi==0.115.5
+uvicorn[standard]==0.32.0
+pyserial==3.5
+openai==1.59.7
+python-dotenv==1.0.1
+bleak==0.22.3
