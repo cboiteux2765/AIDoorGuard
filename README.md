@@ -1,3 +1,3 @@
 # AIDoorGuard
 
-A proactive hardware sensing system that connects to Bluetooth on your mobile device to proactively check if you brought all your items to go somewhere before you leave.
+SB Hacks XII Project, a proactive hardware sensing system to check if you brought all your items to go somewhere before you leave. Uses Arduino, HC05 BlueTooth Module, Motion Sensor which sends a BlueTooth signal and FastAPI web server listens to COM port connections to prompt audio I/O on browser and LLM output retrieval for items to bring.
